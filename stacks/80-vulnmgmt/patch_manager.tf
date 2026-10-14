@@ -24,12 +24,28 @@
 # A patch matching both gets the shortest delay.
 #######################################################################
 
+locals {
+  # Patch baseline names may not begin with "AWS-" or "AWS:" — reserved
+  # for AWS-managed baselines, and the check is case-insensitive:
+  #
+  #   ValidationException: Patch Baseline Name:
+  #   aws-security-lab-amazon-linux cannot starts with: AWS- or AWS:
+  #
+  # Third place this project slug collides with a reserved prefix, after
+  # the SSM document name and the Parameter Store path.
+  patch_baseline_name = "${replace(var.project, "/^aws-/", "")}-amazon-linux"
+}
+
 resource "aws_ssm_patch_baseline" "linux" {
   count = var.enable_patch_manager ? 1 : 0
 
-  name             = "${var.project}-amazon-linux"
+  name             = local.patch_baseline_name
   description      = "Amazon Linux 2023: security patches fast, everything else delayed"
   operating_system = "AMAZON_LINUX_2023"
+
+  # NOTE: CLASSIFICATION values are case-SENSITIVE and capitalised.
+  # Valid values are Security, Bugfix, Enhancement, Recommended and
+  # Newpackage; lowercase "security" is rejected outright.
 
   # Security patches rated Critical or Important: no waiting.
   approval_rule {
@@ -39,7 +55,7 @@ resource "aws_ssm_patch_baseline" "linux" {
 
     patch_filter {
       key    = "CLASSIFICATION"
-      values = ["security"]
+      values = ["Security"]
     }
 
     patch_filter {
@@ -56,7 +72,7 @@ resource "aws_ssm_patch_baseline" "linux" {
 
     patch_filter {
       key    = "CLASSIFICATION"
-      values = ["security", "bugfix"]
+      values = ["Security", "Bugfix"]
     }
   }
 

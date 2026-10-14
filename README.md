@@ -12,25 +12,80 @@ its own state, applied in order.
 
 ## Verification status
 
-Honest accounting of what has been checked and how:
-
 | Check | Status |
 |---|---|
 | `terraform fmt -check -recursive` | passing |
 | `terraform validate`, all 10 roots | passing |
-| Checkov | 336 passed, 0 failed, all suppressions documented |
-| tfsec | 105 passed, 0 findings, 24 documented ignores |
+| Checkov | 336 passed, 0 failed, every suppression documented |
+| tfsec | 0 findings, 24 documented ignores |
 | cfn-guard, SSM Automation documents | 6/6 rules pass |
-| `terraform apply` | **not yet run — see [Applying](#applying)** |
+| `terraform apply`, stacks 00–80 | **applied to a real account** |
+| `control-tower/` | validated only, deliberately not applied |
 
-Static analysis cannot catch everything. Two real defects were found and fixed
-*by* these checks rather than by reading the code, which is the argument for
-running them in CI:
+### Functionally verified, not just applied
 
-- The AFT module declares its own providers, so it cannot take `count`. The
-  `count`-based enable flag was invalid and is now a validated variable.
-- AFT 1.14 requires AWS provider 6.x against the repo's 5.70 pin, producing an
-  unsatisfiable constraint at `init`.
+| What | How | Result |
+|---|---|---|
+| ALB + WAF | `curl` a benign request | `HTTP 200` |
+| WAF SQLi rule | `curl` with `' OR '1'='1' UNION SELECT` | `HTTP 403` blocked |
+| S3 policy, wrong algorithm | `put-object --sse AES256` | `AccessDenied` |
+| S3 policy, correct key | `put-object --sse aws:kms --ssekms-key-id <cmk>` | allowed |
+| S3 policy, no header | `put-object` with no encryption header | allowed, stored `aws:kms` with the correct CMK |
+| GuardDuty → EventBridge → SNS | `create-sample-findings` | rule `TriggeredRules = 1` |
+| Severity filter | LOW-severity sample finding | correctly not alerted |
+
+### Bugs these checks found
+
+The point of running the scanners and then actually applying: **eleven real
+defects surfaced that reading the code did not.** None would have been caught
+by `validate` alone.
+
+Found by `terraform validate`:
+
+1. The AFT module declares its own providers, so it **cannot take `count`** —
+   the enable flag is now a no-default variable with a validation instead.
+2. AFT 1.14 requires AWS provider 6.x against the repo's 5.70 pin, an
+   unsatisfiable constraint at `init`.
+
+Found only by applying:
+
+3. **The state bucket policy deadlocked its own backend.** A `StringNotEquals`
+   deny on `s3:x-amz-server-side-encryption` with no `Null` guard treats the
+   *absent* header as "not equal", so Terraform could never write
+   `terraform.tfstate.tflock`. Fixed with a `Null` condition so the deny only
+   fires when a header is present and wrong.
+4. **`encrypt = true` without `kms_key_id`** makes the S3 backend request
+   SSE-S3 (AES256), which the policy above then correctly rejected. The CMK
+   must be passed in the backend config.
+5. **GuardDuty organization configuration requires a delegated administrator**
+   — a hard prerequisite, not an optional extra. The admin resource was gated
+   behind an empty-by-default variable while the configuration was
+   unconditional, so it failed with `BadRequestException`.
+6. **AWS Config rejects a delivery-channel prefix containing `AWSLogs/`**; it
+   builds that path itself.
+7. **SSM reserves the `aws-`, `amazon` and `amzn` prefixes** for document
+   names. The project slug starts with `aws-`.
+8. **Parameter Store reserves any name beginning with `aws` or `ssm`** —
+   same collision, different service, different error message.
+9. **Patch baseline names may not begin with `AWS-`** — the same collision a
+   third time.
+10. **Patch `CLASSIFICATION` values are case-sensitive.** `Security` works,
+    `security` is rejected.
+11. **EC2 forbids apostrophes in security group rule descriptions.** The
+    allowed set is `a-zA-Z0-9 . _ - : / ( ) # , @ [ ] + = & ; { } ! $ *`, and
+    one description read `the ALB's security group`.
+
+Items 7–9 are the same underlying constraint hitting three different services,
+which is worth internalising: **a project slug beginning with `aws` will
+collide with reserved namespaces across SSM, Parameter Store and Patch
+Manager.** Each is now handled with a documented `replace(var.project,
+"/^aws-/", "")` and a comment quoting the exact error.
+
+Item 3 is the one worth dwelling on. The "deny unencrypted uploads" statement
+is near-universal copy-paste, and without the `Null` guard it breaks any
+caller that relies on default bucket encryption — which is most of them. The
+same bug was present on the protected data bucket in `60-data` and was only
+caught by testing all three upload paths rather than the obvious two.
 
 ---
 

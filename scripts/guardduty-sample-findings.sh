@@ -59,10 +59,16 @@ done
 echo
 echo "Findings are generated asynchronously; allow 30-60 seconds."
 echo
+# Note: filtering on service.additionalInfo.sample is rejected by the
+# API (InvalidInputException) despite appearing in older examples. Plain
+# list-findings plus a title check is what actually works — sample
+# findings are prefixed "[SAMPLE]".
 echo "Watch them arrive:"
-echo "  aws guardduty list-findings --region $REGION \\"
-echo "    --detector-id $DETECTOR_ID \\"
-echo "    --finding-criteria '{\"Criterion\":{\"service.additionalInfo.sample\":{\"Eq\":[\"true\"]}}}'"
+echo "  aws guardduty list-findings --region $REGION --detector-id $DETECTOR_ID"
+echo
+echo "The authoritative check is the EventBridge metric below: it proves"
+echo "the rule matched and invoked its SNS target. A non-zero Sum means"
+echo "the detection path works end to end."
 echo
 echo "Confirm the EventBridge rule matched:"
 echo "  aws cloudwatch get-metric-statistics --region $REGION \\"

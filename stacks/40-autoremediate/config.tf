@@ -251,7 +251,17 @@ resource "aws_config_configuration_recorder" "this" {
 resource "aws_config_delivery_channel" "this" {
   name           = "${var.project}-delivery"
   s3_bucket_name = aws_s3_bucket.config.id
-  s3_key_prefix  = "AWSLogs/${local.account_id}/Config"
+
+  # NO s3_key_prefix. Config builds the path itself as
+  # AWSLogs/<account-id>/Config/... and explicitly rejects a prefix
+  # containing "AWSLogs/":
+  #
+  #   InvalidS3KeyPrefixException: The Amazon S3 key prefix is invalid.
+  #   Ensure you do not have 'AWSLogs/' in your prefix.
+  #
+  # Setting a prefix here would also nest the real path underneath it,
+  # so the bucket policy's AWSLogs/<account>/Config/* resource would no
+  # longer match and delivery would fail a second way.
 
   snapshot_delivery_properties {
     delivery_frequency = "TwentyFour_Hours"

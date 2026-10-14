@@ -74,10 +74,32 @@ resource "aws_guardduty_detector_feature" "ebs_malware_protection" {
 # management account instead, which keeps the lab to two accounts.
 #######################################################################
 
-resource "aws_guardduty_organization_admin_account" "this" {
-  count = var.delegated_admin_account_id != "" ? 1 : 0
+#######################################################################
+# A delegated administrator is a HARD PREREQUISITE for organization
+# configuration, not an optional extra. Without one,
+# UpdateOrganizationConfiguration fails outright:
+#
+#   BadRequestException: The request failed because a delegated
+#   administrator account has not been enabled.
+#
+# So the admin account is always designated. When
+# `delegated_admin_account_id` is empty it falls back to this
+# management account, which GuardDuty permits.
+#
+# Note the asymmetry with Security Hub below: Security Hub does NOT
+# accept the management account as its delegated administrator, which
+# is why that resource stays gated on an explicit member account ID
+# while this one does not.
+#######################################################################
 
-  admin_account_id = var.delegated_admin_account_id
+locals {
+  guardduty_admin_account_id = var.delegated_admin_account_id != "" ? var.delegated_admin_account_id : local.account_id
+}
+
+resource "aws_guardduty_organization_admin_account" "this" {
+  admin_account_id = local.guardduty_admin_account_id
+
+  depends_on = [aws_guardduty_detector_feature.s3_data_events]
 }
 
 # Auto-enables GuardDuty in every account that joins the org from now on,

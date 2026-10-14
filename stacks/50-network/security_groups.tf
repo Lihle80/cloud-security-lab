@@ -92,7 +92,10 @@ resource "aws_security_group" "app" {
 
 resource "aws_vpc_security_group_ingress_rule" "app_from_alb" {
   security_group_id = aws_security_group.app.id
-  description       = "Application port from the ALB's security group"
+  # No apostrophe: EC2 restricts rule descriptions to
+  #   a-zA-Z0-9 . _ - : / ( ) # , @ [ ] + = & ; { } ! $ *
+  # and rejects the whole request with InvalidParameterValue otherwise.
+  description = "Application port from the ALB security group"
 
   referenced_security_group_id = aws_security_group.alb.id
 

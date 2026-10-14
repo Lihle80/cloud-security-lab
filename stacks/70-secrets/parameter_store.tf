@@ -40,8 +40,21 @@ data "aws_kms_key" "data_for_params" {
   key_id = "alias/${var.project}-data"
 }
 
+locals {
+  # Parameter Store reserves any name beginning with "aws" or "ssm",
+  # case-insensitive, and rejects the write outright:
+  #
+  #   AccessDeniedException: No access to reserved parameter name:
+  #   aws-security-lab/app/db-endpoint
+  #
+  # The project slug starts with "aws-", so strip it for parameter
+  # paths. Same constraint bites SSM document names in
+  # stacks/40-autoremediate/remediation.tf.
+  parameter_prefix = "/${replace(var.project, "/^aws-/", "")}"
+}
+
 resource "aws_ssm_parameter" "api_key" {
-  name        = "/${var.project}/app/api-key"
+  name        = "${local.parameter_prefix}/app/api-key"
   description = "Example rotating-by-hand credential. Real value set out of band."
 
   # SecureString is what engages KMS. A `String` parameter is stored in
@@ -71,7 +84,7 @@ resource "aws_ssm_parameter" "api_key" {
 #######################################################################
 
 resource "aws_ssm_parameter" "db_endpoint" {
-  name        = "/${var.project}/app/db-endpoint"
+  name        = "${local.parameter_prefix}/app/db-endpoint"
   description = "Database hostname. Not a secret, so not a SecureString."
   type        = "String"
 
@@ -92,7 +105,7 @@ resource "aws_ssm_parameter" "db_endpoint" {
 resource "aws_ssm_parameter" "db_secret_arn" {
   count = var.enable_rds ? 1 : 0
 
-  name        = "/${var.project}/app/db-secret-arn"
+  name        = "${local.parameter_prefix}/app/db-secret-arn"
   description = "ARN of the RDS-managed master user secret"
   type        = "String"
   value       = aws_db_instance.this[0].master_user_secret[0].secret_arn
@@ -138,7 +151,7 @@ data "aws_iam_policy_document" "param_reader" {
     ]
 
     resources = [
-      "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter/${var.project}/*",
+      "arn:${local.partition}:ssm:${var.region}:${local.account_id}:parameter${local.parameter_prefix}/*",
     ]
   }
 

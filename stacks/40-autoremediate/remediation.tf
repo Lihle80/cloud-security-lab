@@ -10,8 +10,19 @@
 #     -> next evaluation returns COMPLIANT
 #######################################################################
 
+locals {
+  # Systems Manager reserves the prefixes "aws-", "amazon" and "amzn"
+  # for AWS-owned documents and rejects anything else using them:
+  #
+  #   ValidationException: Invalid document name
+  #   aws-security-lab-PutS3PublicAccessBlock
+  #
+  # The project slug starts with "aws-", so strip it for this one name.
+  ssm_document_name = "${replace(var.project, "/^aws-/", "")}-PutS3PublicAccessBlock"
+}
+
 resource "aws_ssm_document" "block_s3_public_access" {
-  name            = "${var.project}-PutS3PublicAccessBlock"
+  name            = local.ssm_document_name
   document_type   = "Automation"
   document_format = "YAML"
 

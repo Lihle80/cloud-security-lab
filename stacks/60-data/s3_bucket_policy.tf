@@ -139,9 +139,24 @@ data "aws_iam_policy_document" "protected" {
     }
   }
 
-  # 3. The upload must ask for SSE-KMS.
+  # 3. An upload that ASKS for the wrong algorithm is denied; one that
+  #    asks for nothing is allowed and gets the bucket default, which is
+  #    SSE-KMS with the key below.
+  #
+  #    The Null condition is what makes this usable. Verified by testing
+  #    the policy without it:
+  #
+  #      aws s3api put-object --server-side-encryption AES256   -> denied
+  #      aws s3api put-object --server-side-encryption aws:kms  -> allowed
+  #      aws s3api put-object   (no header at all)              -> DENIED
+  #
+  #    That third case is every plain `aws s3 cp` and most SDK defaults.
+  #    Denying it buys nothing — default encryption already guarantees
+  #    SSE-KMS with the correct CMK — and breaks ordinary use. Both
+  #    conditions must hold, so the deny now applies only when a header
+  #    is present and names something other than aws:kms.
   statement {
-    sid       = "DenyUnencryptedUploads"
+    sid       = "DenyIncorrectEncryptionHeader"
     effect    = "Deny"
     actions   = ["s3:PutObject"]
     resources = ["${aws_s3_bucket.protected.arn}/*"]
@@ -156,11 +171,19 @@ data "aws_iam_policy_document" "protected" {
       variable = "s3:x-amz-server-side-encryption"
       values   = ["aws:kms"]
     }
+
+    # "false" means the key is NOT null, i.e. a header was supplied.
+    condition {
+      test     = "Null"
+      variable = "s3:x-amz-server-side-encryption"
+      values   = ["false"]
+    }
   }
 
-  # 4. And name this key specifically, not just any KMS key. Without
-  #    this, a caller could encrypt with a key in their own account that
-  #    you cannot read — a denial-of-service on your own data.
+  # 4. And if a key IS named, it must be this one. Without this a caller
+  #    could encrypt with a key in their own account that you cannot
+  #    read — a denial-of-service on your own data. Same Null guard, so
+  #    omitting the header falls through to the bucket default key.
   statement {
     sid       = "DenyWrongKmsKey"
     effect    = "Deny"
@@ -176,6 +199,12 @@ data "aws_iam_policy_document" "protected" {
       test     = "StringNotEquals"
       variable = "s3:x-amz-server-side-encryption-aws-kms-key-id"
       values   = [aws_kms_key.data.arn]
+    }
+
+    condition {
+      test     = "Null"
+      variable = "s3:x-amz-server-side-encryption-aws-kms-key-id"
+      values   = ["false"]
     }
   }
 
