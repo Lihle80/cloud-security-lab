@@ -1,0 +1,65 @@
+#
+# cfn-guard rules for SSM Automation documents.
+#
+# These are the CloudFormation-shaped artefacts in this repo, and they
+# run unattended with an assumed role — which is exactly the kind of
+# thing worth gating in CI.
+#
+# Run locally:
+#   cfn-guard validate \
+#     --rules policies/ssm-document.guard \
+#     --data stacks/40-autoremediate/documents/put-s3-public-access-block.yaml
+#
+
+rule document_uses_current_schema {
+    schemaVersion == "0.3"
+    <<
+        Automation documents must declare schemaVersion 0.3. Earlier
+        versions do not support assumeRole or aws:executeAwsApi.
+    >>
+}
+
+rule document_is_described {
+    description exists
+    description != ""
+    <<
+        Every document needs a description. An unattended remediation
+        with no stated purpose is unreviewable.
+    >>
+}
+
+rule document_assumes_an_explicit_role {
+    assumeRole exists
+    assumeRole == "{{ AutomationAssumeRole }}"
+    <<
+        The document must run as an explicitly passed role rather than
+        inheriting the caller's permissions, so the blast radius of the
+        automation is defined by that role alone.
+    >>
+}
+
+rule assume_role_is_a_typed_parameter {
+    parameters.AutomationAssumeRole exists
+    parameters.AutomationAssumeRole.type == "AWS::IAM::Role::Arn"
+    <<
+        AutomationAssumeRole must be typed as AWS::IAM::Role::Arn so SSM
+        validates the value instead of accepting any string.
+    >>
+}
+
+rule every_step_is_bounded {
+    mainSteps[*] {
+        timeoutSeconds exists
+        <<
+            Every step needs a timeout. A step without one can hang
+            indefinitely and hold the remediation open.
+        >>
+    }
+}
+
+rule steps_are_documented {
+    mainSteps[*] {
+        description exists
+        <<Every step needs a description explaining what it does.>>
+    }
+}

@@ -1,0 +1,203 @@
+# Checkov configuration
+#
+# Every skip below names the check and says why it does not apply. A
+# skip without a stated reason is indistinguishable from a finding
+# nobody looked at, which is how scanners stop being useful.
+#
+# Resource-specific skips live inline in the Terraform, next to the
+# resource, so a reviewer reading the code sees them. Only checks that
+# fail structurally across the whole repo are listed here.
+
+framework:
+  - terraform
+
+quiet: true
+compact: true
+soft-fail: false
+
+skip-check:
+  # -------------------------------------------------------------------
+  # KMS KEY POLICIES — checkov applies identity-policy logic to
+  # resource policies
+  #
+  # A KMS key policy's `Resource` MUST be "*". In a key policy that
+  # string means "this key, the one the policy is attached to" — there
+  # is no other legal value, and an ARN there is rejected by the API.
+  # So these three checks can never pass on a correct key policy.
+  #
+  # Affects: data_key, backup_key, alerts_key, state, trail.
+  # -------------------------------------------------------------------
+  - CKV_AWS_111 # write access without constraints
+  - CKV_AWS_356 # "*" as a statement resource
+  - CKV_AWS_109 # permissions management without constraints
+
+  # -------------------------------------------------------------------
+  # PERMISSION BOUNDARY — the wildcard is the mechanism, not a mistake
+  #
+  # A boundary is a ceiling, not a grant: effective permissions are
+  # (identity policy AND boundary). It must therefore start at "*" and
+  # subtract with Deny statements. A boundary that enumerated allowed
+  # actions instead would silently block anything omitted, and would
+  # need editing every time AWS ships a service.
+  #
+  # The actual control is the Deny set in
+  # stacks/20-identity/permission_boundary.tf, which no identity policy
+  # can override. Reviewed by hand; see the comment block there.
+  # -------------------------------------------------------------------
+  - CKV_AWS_1 # full "*-*" administrative privileges
+  - CKV_AWS_49 # "*" as a statement action
+  - CKV_AWS_107 # credentials exposure
+  - CKV_AWS_108 # data exfiltration
+  - CKV_AWS_110 # privilege escalation
+  - CKV2_AWS_40 # full IAM privileges
+
+  # -------------------------------------------------------------------
+  # VPC ENDPOINT POLICY — Principal "*" is the documented pattern
+  #
+  # An endpoint policy has no identity to name, so it uses Principal
+  # "*" constrained by a condition. Ours is scoped with
+  # aws:PrincipalOrgID, which is what actually prevents the endpoint
+  # being used to reach a third party's bucket.
+  # -------------------------------------------------------------------
+  - CKV_AWS_283 # policy allows ALL or any AWS principal
+
+  # -------------------------------------------------------------------
+  # NETWORK ACLS — checkov does not model rule-number ordering
+  #
+  # CKV_AWS_352 fires on `isolated_in_deny_all`, which is a DENY rule.
+  # Reporting a deny-all as "allows all ports" is simply wrong.
+  #
+  # CKV_AWS_231 fires on `public_in_ephemeral` because 1024-65535
+  # contains 3389. NACLs evaluate in rule-number order and first match
+  # wins; RDP is explicitly denied at rule 20, long before the
+  # ephemeral allow at rule 120. Stateless NACLs cannot express
+  # "responses only", so the ephemeral range is unavoidable.
+  # -------------------------------------------------------------------
+  - CKV_AWS_352 # NACL ingress allows all ports
+  - CKV_AWS_231 # NACL ingress 0.0.0.0/0 to 3389
+
+  # -------------------------------------------------------------------
+  # PUBLIC ALB — being reachable is the point
+  #
+  # A public ALB behind WAF is what lab item 5 demonstrates. Narrow
+  # `alb_allowed_cidrs` to your own address to keep it private while
+  # exercising the identical path.
+  # -------------------------------------------------------------------
+  - CKV_AWS_260 # SG ingress 0.0.0.0/0 to port 80
+
+  # -------------------------------------------------------------------
+  # NO ACM CERTIFICATE IN THE LAB
+  #
+  # These three findings are CORRECT. Issuing a certificate needs a
+  # domain, which this lab does not have. Set `certificate_arn` and all
+  # three resolve on their own: the HTTP listener is replaced by a 301
+  # and an HTTPS listener with a TLS 1.3/1.2 policy.
+  # -------------------------------------------------------------------
+  - CKV_AWS_2 # ALB protocol is HTTPS
+  - CKV_AWS_103 # at least TLS 1.2
+  - CKV2_AWS_20 # HTTP redirects to HTTPS
+
+  # -------------------------------------------------------------------
+  # LOG BUCKETS AND LOG GROUPS
+  #
+  # Versioning on an append-only log bucket duplicates storage for data
+  # that is never overwritten. Access-logging a log bucket recurses.
+  # ALB access logging does not support a CMK at all. Config and flow
+  # logs produce enormous numbers of small objects where per-object KMS
+  # calls cost more than the storage. Each is argued in place.
+  # -------------------------------------------------------------------
+  - CKV_AWS_18 # S3 access logging
+  - CKV2_AWS_62 # S3 event notifications
+  - CKV_AWS_21 # S3 versioning
+  - CKV_AWS_145 # S3 encrypted with KMS
+  - CKV_AWS_158 # CloudWatch log group encrypted with KMS
+  - CKV_AWS_338 # one year log retention
+  - CKV_AWS_144 # cross-region replication
+  - CKV2_AWS_61 # lifecycle configuration
+
+  # -------------------------------------------------------------------
+  # CLOUDTRAIL SNS
+  #
+  # CKV_AWS_252 wants an SNS topic on the trail. That notifies per log
+  # file delivered — thousands of messages a day saying "a file
+  # arrived". The useful signal is the finding, not the delivery, and
+  # stack 30-detection routes GuardDuty and Security Hub findings to
+  # SNS via EventBridge instead.
+  # -------------------------------------------------------------------
+  - CKV_AWS_252
+
+  # -------------------------------------------------------------------
+  # LAB TEARDOWN
+  #
+  # Deletion protection on the ALB and RDS would mean a two-step
+  # destroy every time. Both are called out in the code as settings to
+  # invert for anything real.
+  # -------------------------------------------------------------------
+  - CKV_AWS_150 # ALB deletion protection
+  - CKV_AWS_157 # RDS multi-AZ
+
+  # -------------------------------------------------------------------
+  # CI APPLY ROLE USES AdministratorAccess
+  #
+  # The one deliberate privilege trade-off, documented in the README
+  # and in stacks/00-bootstrap/github_oidc.tf. This lab provisions
+  # across Organizations, Identity Center, KMS, Config, GuardDuty,
+  # Security Hub, Inspector and Backup; a hand-written least-privilege
+  # policy would be larger than the lab and would break on every
+  # addition.
+  #
+  # The control that matters is the OIDC trust policy, which matches
+  # `repo:<owner>/<repo>:ref:refs/heads/main` exactly — so the role is
+  # unassumable from a branch, a tag, a pull request or a fork.
+  # -------------------------------------------------------------------
+  - CKV_AWS_274
+
+  # -------------------------------------------------------------------
+  # PARAMETER STORE — the plain String is the lesson
+  #
+  # CKV2_AWS_34 fires on `db_endpoint` and `db_secret_arn`, which are
+  # deliberately type String. A hostname and a secret ARN are not
+  # secrets; encrypting them achieves nothing except making them harder
+  # to read and adding KMS calls. The SecureString/String contrast is
+  # the point of lab item 7 — see the comment block in
+  # stacks/70-secrets/parameter_store.tf.
+  # -------------------------------------------------------------------
+  - CKV2_AWS_34
+
+  # -------------------------------------------------------------------
+  # RESOLUTION LIMITS IN CHECKOV'S GRAPH
+  #
+  # CKV2_AWS_5  security groups "not attached". The network stack
+  #             deliberately ships no workloads; the groups exist for
+  #             the data and secrets stacks to consume by tag.
+  #
+  # CKV2_AWS_3  "GuardDuty not enabled". Fires on the count = 0
+  #             aws_guardduty_detector resource. GuardDuty IS enabled;
+  #             the detector is read via data source because a region
+  #             permits only one.
+  #
+  # CKV2_AWS_76 "WAF missing Log4j rule group".
+  #             AWSManagedRulesKnownBadInputsRuleSet is present at
+  #             priority 4 and contains the Log4JRCE rule. Checkov
+  #             fails to follow the web ACL association from the ALB.
+  #
+  # CKV_AWS_394 availability zone pinning. `data.aws_availability_zones`
+  #             returns names sorted, and the config slices the first
+  #             `az_count`, so a newly added zone appends and cannot
+  #             shift the existing selection.
+  # -------------------------------------------------------------------
+  - CKV2_AWS_5
+  - CKV2_AWS_3
+  - CKV2_AWS_76
+  - CKV_AWS_394
+
+  # -------------------------------------------------------------------
+  # MODULE PINNING
+  #
+  # The only external module is the AFT registry module, pinned by
+  # semver, which is how the registry is designed to be consumed.
+  # -------------------------------------------------------------------
+  - CKV_TF_1
+
+skip-path:
+  - .terraform

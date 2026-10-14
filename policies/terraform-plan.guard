@@ -1,0 +1,138 @@
+#
+# cfn-guard rules evaluated against `terraform show -json tfplan`.
+#
+# This is the closest Terraform equivalent of a Control Tower proactive
+# control. A real proactive control is a CloudFormation Hook and never
+# fires for a Terraform apply, so the same policy-as-code engine is
+# pointed at the plan instead — catching the misconfiguration before
+# apply rather than after.
+#
+# Run locally:
+#   terraform show -json tfplan > plan.json
+#   cfn-guard validate --rules policies/terraform-plan.guard --data plan.json
+#
+
+#######################################################################
+# Collections, filtered out of the plan's resource_changes array.
+#######################################################################
+
+let sg_ingress   = resource_changes[ type == "aws_vpc_security_group_ingress_rule" ]
+let buckets      = resource_changes[ type == "aws_s3_bucket_public_access_block" ]
+let kms_keys     = resource_changes[ type == "aws_kms_key" ]
+let db_instances = resource_changes[ type == "aws_db_instance" ]
+let iam_policies = resource_changes[ type == "aws_iam_role_policy" ]
+let log_groups   = resource_changes[ type == "aws_cloudwatch_log_group" ]
+
+#######################################################################
+# Networking
+#######################################################################
+
+rule no_unrestricted_admin_ingress when %sg_ingress !empty {
+    %sg_ingress {
+        when change.after.cidr_ipv4 == "0.0.0.0/0" {
+            change.after.from_port != 22
+            <<SSH must never be open to 0.0.0.0/0.>>
+
+            change.after.from_port != 3389
+            <<RDP must never be open to 0.0.0.0/0.>>
+
+            change.after.from_port != 5432
+            <<PostgreSQL must never be open to 0.0.0.0/0.>>
+
+            change.after.from_port != 3306
+            <<MySQL must never be open to 0.0.0.0/0.>>
+        }
+    }
+}
+
+rule ingress_rules_are_described when %sg_ingress !empty {
+    %sg_ingress {
+        change.after.description exists
+        change.after.description != ""
+        <<
+            Every security group rule needs a description. An
+            undocumented rule is one nobody will dare remove later.
+        >>
+    }
+}
+
+#######################################################################
+# S3
+#######################################################################
+
+rule public_access_blocked_completely when %buckets !empty {
+    %buckets {
+        change.after.block_public_acls == true
+        change.after.block_public_policy == true
+        change.after.ignore_public_acls == true
+        change.after.restrict_public_buckets == true
+        <<
+            All four public access block flags must be true. Setting
+            three of four leaves a path open.
+        >>
+    }
+}
+
+#######################################################################
+# KMS
+#######################################################################
+
+rule kms_keys_rotate when %kms_keys !empty {
+    %kms_keys {
+        change.after.enable_key_rotation == true
+        <<Customer-managed keys must have automatic rotation enabled.>>
+    }
+}
+
+rule kms_deletion_window_is_survivable when %kms_keys !empty {
+    %kms_keys {
+        change.after.deletion_window_in_days >= 7
+        <<
+            Deletion window must be at least 7 days, so an accidental
+            ScheduleKeyDeletion can be noticed and cancelled.
+        >>
+    }
+}
+
+#######################################################################
+# RDS
+#######################################################################
+
+rule rds_is_private when %db_instances !empty {
+    %db_instances {
+        change.after.publicly_accessible == false
+        <<Database instances must not be publicly accessible.>>
+    }
+}
+
+rule rds_is_encrypted when %db_instances !empty {
+    %db_instances {
+        change.after.storage_encrypted == true
+        <<Database storage must be encrypted at rest.>>
+    }
+}
+
+rule rds_password_is_managed when %db_instances !empty {
+    %db_instances {
+        change.after.manage_master_user_password == true
+        <<
+            Master passwords must be managed by RDS, so no plaintext
+            credential enters Terraform state.
+        >>
+    }
+}
+
+#######################################################################
+# Logging
+#######################################################################
+
+rule log_groups_have_retention when %log_groups !empty {
+    %log_groups {
+        change.after.retention_in_days exists
+        change.after.retention_in_days > 0
+        <<
+            Log groups must set a retention. The default is "never
+            expire", which bills forever.
+        >>
+    }
+}

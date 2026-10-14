@@ -1,0 +1,121 @@
+name: terraform-apply
+
+# Applies on merge to main, via OIDC into the apply role. The role's
+# trust policy matches `repo:<owner>/<repo>:ref:refs/heads/main`
+# exactly, so this workflow cannot be made to run from a branch, a tag
+# or a fork.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "stacks/**"
+      - ".github/workflows/terraform-apply.yml"
+  workflow_dispatch:
+    inputs:
+      stack:
+        description: "Single stack to apply, or \"all\""
+        required: true
+        default: all
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  TF_VERSION: "1.11.4"
+  AWS_REGION: us-west-2
+
+# Never two applies against one state at once.
+concurrency:
+  group: terraform-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    name: apply ${{ matrix.stack }}
+    runs-on: ubuntu-latest
+
+    if: vars.AWS_APPLY_ROLE_ARN != ''
+
+    # Requires a GitHub Environment named "production" with a required
+    # reviewer. That is what puts a human in front of every apply —
+    # the job pauses here until someone approves it.
+    environment:
+      name: production
+
+    # max-parallel 1 because the stacks are ordered: SCPs before
+    # detection, Config before Security Hub reports meaningfully, the
+    # network before the database that sits in it.
+    strategy:
+      fail-fast: true
+      max-parallel: 1
+      matrix:
+        stack:
+          - 10-org
+          - 20-identity
+          - 30-detection
+          - 40-autoremediate
+          - 50-network
+          - 60-data
+          - 70-secrets
+          - 80-vulnmgmt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: skip unselected stack
+        id: filter
+        run: |
+          want="${{ github.event.inputs.stack || 'all' }}"
+          if [ "$want" = "all" ] || [ "$want" = "${{ matrix.stack }}" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: configure aws credentials
+        if: steps.filter.outputs.run == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_APPLY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-apply-${{ github.run_id }}
+
+      - name: terraform init
+        if: steps.filter.outputs.run == 'true'
+        working-directory: stacks/${{ matrix.stack }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      # Plan to a file, then apply that exact file. Applying a saved
+      # plan means the approved change is the change that lands, rather
+      # than whatever the world looks like a few minutes later.
+      - name: terraform plan
+        if: steps.filter.outputs.run == 'true'
+        working-directory: stacks/${{ matrix.stack }}
+        run: terraform plan -input=false -lock-timeout=5m -out=tfplan
+
+      - name: terraform apply
+        if: steps.filter.outputs.run == 'true'
+        working-directory: stacks/${{ matrix.stack }}
+        run: terraform apply -input=false -lock-timeout=5m -auto-approve tfplan
+
+      - name: outputs
+        if: steps.filter.outputs.run == 'true'
+        working-directory: stacks/${{ matrix.stack }}
+        run: |
+          {
+            echo "### Applied \`${{ matrix.stack }}\`"
+            echo
+            echo '```json'
+            terraform output -json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,295 @@
+name: terraform-plan
+
+# Lab item 9: every PR is formatted, validated, scanned by three
+# independent policy engines, and planned — with no long-lived AWS keys
+# anywhere. Authentication is GitHub OIDC into a role that can only
+# read.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Least privilege at the workflow level.
+#   id-token: write  is what lets the job request an OIDC token. Without
+#                    it, aws-actions/configure-aws-credentials cannot
+#                    federate and falls back to looking for keys.
+#   contents: read   to check out.
+#   pull-requests: write  to post the plan summary as a comment.
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+env:
+  TF_VERSION: "1.11.4"
+  AWS_REGION: us-west-2
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  #####################################################################
+  # Static checks that need no cloud credentials at all.
+  #####################################################################
+  lint:
+    name: fmt and validate
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt
+        run: terraform fmt -check -recursive -diff
+
+      # -backend=false so validation needs no state access, and
+      # therefore no credentials.
+      #
+      # control-tower/aft is included here but excluded from the local
+      # script, because `init` downloads the AFT module tree and takes
+      # several minutes — acceptable in CI, tedious on a laptop.
+      - name: terraform validate
+        run: |
+          set -euo pipefail
+          failed=0
+          while IFS= read -r dir; do
+            echo "::group::validate $dir"
+            if terraform -chdir="$dir" init -backend=false -input=false >/dev/null; then
+              terraform -chdir="$dir" validate || failed=1
+            else
+              echo "init failed in $dir"; failed=1
+            fi
+            echo "::endgroup::"
+          done < <(find stacks control-tower -name '*.tf' -printf '%h\n' | sort -u)
+          exit $failed
+
+  #####################################################################
+  # Three scanners, because they disagree usefully.
+  #
+  #   checkov    broadest rule set, understands Terraform plan output
+  #   tfsec      fast, Terraform-native, good at IAM and networking
+  #   cfn-guard  AWS's own policy-as-code engine — the same one behind
+  #              Control Tower proactive controls, which run as
+  #              CloudFormation Hooks. Including it here is the closest
+  #              Terraform equivalent of a proactive control, since a
+  #              real Hook never fires for a Terraform apply.
+  #
+  # continue-on-error is set so that one scanner's opinion cannot block
+  # the others from reporting. The gate job at the end decides.
+  #####################################################################
+  checkov:
+    name: checkov
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: bridgecrewio/checkov-action@master
+        id: checkov
+        continue-on-error: true
+        with:
+          directory: .
+          framework: terraform
+          output_format: cli,sarif
+          output_file_path: console,checkov.sarif
+          config_file: .checkov.yaml
+
+      - name: upload sarif
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() && hashFiles('checkov.sarif') != ''
+        with:
+          sarif_file: checkov.sarif
+          category: checkov
+
+      - name: fail on hard findings
+        if: steps.checkov.outcome == 'failure'
+        run: |
+          echo "checkov reported findings not covered by a documented skip."
+          exit 1
+
+  tfsec:
+    name: tfsec
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: aquasecurity/tfsec-sarif-action@v0.1.4
+        with:
+          sarif_file: tfsec.sarif
+
+      - name: upload sarif
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: tfsec.sarif
+          category: tfsec
+
+  cfn-guard:
+    name: cfn-guard
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install cfn-guard
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://github.com/aws-cloudformation/cloudformation-guard/releases/latest/download/cfn-guard-v3-ubuntu-latest.tar.gz \
+            -o cfn-guard.tar.gz
+          tar -xzf cfn-guard.tar.gz
+          sudo install -m 0755 cfn-guard-v3-*/cfn-guard /usr/local/bin/cfn-guard
+          cfn-guard --version
+
+      # Validates the SSM Automation documents, which are the
+      # CloudFormation-shaped artefacts in this repo.
+      - name: validate SSM documents
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          docs=(stacks/*/documents/*.yaml)
+          if [ ${#docs[@]} -eq 0 ]; then
+            echo "no documents to validate"; exit 0
+          fi
+          for d in "${docs[@]}"; do
+            echo "::group::cfn-guard $d"
+            cfn-guard validate \
+              --rules policies/ssm-document.guard \
+              --data "$d" \
+              --show-summary fail
+            echo "::endgroup::"
+          done
+
+  #####################################################################
+  # Plan. The only job that touches AWS, and it assumes a read-only
+  # role scoped to this repository by the OIDC trust policy.
+  #####################################################################
+  plan:
+    name: plan ${{ matrix.stack }}
+    runs-on: ubuntu-latest
+    needs: [lint]
+
+    # Skipped cleanly on a fork or before bootstrap has been applied,
+    # rather than failing with a confusing credentials error.
+    if: vars.AWS_PLAN_ROLE_ARN != '' && github.event.pull_request.head.repo.full_name == github.repository
+
+    strategy:
+      fail-fast: false
+      matrix:
+        stack:
+          - 10-org
+          - 20-identity
+          - 30-detection
+          - 40-autoremediate
+          - 50-network
+          - 60-data
+          - 70-secrets
+          - 80-vulnmgmt
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+          terraform_wrapper: false
+
+      # No access keys. The action exchanges the GitHub OIDC token for
+      # short-lived STS credentials.
+      - name: configure aws credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_PLAN_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          role-session-name: gha-plan-${{ github.run_id }}
+
+      - name: terraform init
+        working-directory: stacks/${{ matrix.stack }}
+        run: |
+          terraform init -input=false \
+            -backend-config="bucket=${{ vars.TF_STATE_BUCKET }}" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: terraform plan
+        id: plan
+        working-directory: stacks/${{ matrix.stack }}
+        run: |
+          set -euo pipefail
+          terraform plan -input=false -no-color -lock-timeout=5m \
+            -out=tfplan 2>&1 | tee plan.txt
+          terraform show -json tfplan > plan.json
+
+      # cfn-guard against the plan JSON: the same policy-as-code engine
+      # Control Tower proactive controls use, applied to what Terraform
+      # is actually about to create.
+      - name: cfn-guard on plan
+        working-directory: stacks/${{ matrix.stack }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            https://github.com/aws-cloudformation/cloudformation-guard/releases/latest/download/cfn-guard-v3-ubuntu-latest.tar.gz \
+            -o cfn-guard.tar.gz
+          tar -xzf cfn-guard.tar.gz
+          ./cfn-guard-v3-*/cfn-guard validate \
+            --rules ../../policies/terraform-plan.guard \
+            --data plan.json \
+            --show-summary fail
+
+      - name: comment plan on PR
+        uses: actions/github-script@v7
+        if: always()
+        with:
+          script: |
+            const fs = require('fs');
+            const path = 'stacks/${{ matrix.stack }}/plan.txt';
+            let body = '### Plan: `${{ matrix.stack }}`\n\n';
+            try {
+              let out = fs.readFileSync(path, 'utf8');
+              // GitHub caps comments at 65536 characters.
+              if (out.length > 60000) {
+                out = out.slice(0, 60000) + '\n\n...truncated, see the job log.';
+              }
+              body += '```hcl\n' + out + '\n```';
+            } catch (e) {
+              body += '_Plan did not produce output; see the job log._';
+            }
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body,
+            });
+
+  #####################################################################
+  # Single required status check, so branch protection needs one entry
+  # rather than one per job.
+  #####################################################################
+  gate:
+    name: security gate
+    runs-on: ubuntu-latest
+    needs: [lint, checkov, tfsec, cfn-guard]
+    if: always()
+
+    steps:
+      - name: evaluate
+        run: |
+          echo "lint=${{ needs.lint.result }}"
+          echo "checkov=${{ needs.checkov.result }}"
+          echo "tfsec=${{ needs.tfsec.result }}"
+          echo "cfn-guard=${{ needs.cfn-guard.result }}"
+          if [ "${{ needs.lint.result }}" != "success" ] \
+          || [ "${{ needs.checkov.result }}" != "success" ] \
+          || [ "${{ needs.tfsec.result }}" != "success" ] \
+          || [ "${{ needs.cfn-guard.result }}" != "success" ]; then
+            echo "::error::security gate failed"
+            exit 1
+          fi
+          echo "all checks passed"

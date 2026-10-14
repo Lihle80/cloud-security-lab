@@ -1,0 +1,54 @@
+schemaVersion: '0.3'
+description: >-
+  Applies a full S3 Public Access Block to a bucket and then asserts it took
+  effect. Written for AWS Config automatic remediation, which passes the
+  non-compliant bucket in as BucketName.
+
+  Chosen over the AWS-managed AWS-DisableS3BucketPublicReadWrite document
+  because that one only rewrites the bucket ACL. A public *bucket policy*
+  survives an ACL change, so ACL-only remediation leaves the bucket exposed.
+  PutPublicAccessBlock overrides both ACLs and policy, which actually closes
+  the hole.
+
+assumeRole: '{{ AutomationAssumeRole }}'
+
+parameters:
+  BucketName:
+    type: String
+    description: Name of the bucket to lock down.
+    allowedPattern: '^[a-z0-9][a-z0-9.\-]{1,61}[a-z0-9]$'
+  AutomationAssumeRole:
+    type: AWS::IAM::Role::Arn
+    description: Role Systems Manager assumes to perform the remediation.
+
+mainSteps:
+  - name: ApplyPublicAccessBlock
+    action: aws:executeAwsApi
+    onFailure: Abort
+    timeoutSeconds: 60
+    description: Set all four public access block flags on the bucket.
+    inputs:
+      Service: s3
+      Api: PutPublicAccessBlock
+      Bucket: '{{ BucketName }}'
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+  - name: VerifyPublicAccessBlock
+    action: aws:assertAwsResourceProperty
+    onFailure: Abort
+    timeoutSeconds: 60
+    description: >-
+      Fail the automation if the block did not stick. Without this the
+      remediation would report success even if a competing policy or an
+      eventual-consistency lag left the bucket open.
+    inputs:
+      Service: s3
+      Api: GetPublicAccessBlock
+      Bucket: '{{ BucketName }}'
+      PropertySelector: '$.PublicAccessBlockConfiguration.RestrictPublicBuckets'
+      DesiredValues:
+        - 'true'
