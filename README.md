@@ -257,6 +257,16 @@ creates a public bucket.
 See [`docs/TESTING.md`](docs/TESTING.md) for what each test proves and the
 failure modes worth knowing.
 
+## Documentation
+
+| Document | Covers |
+|---|---|
+| [`docs/TESTING.md`](docs/TESTING.md) | What each test proves, verified results, failure modes in diagnostic order |
+| [`docs/RUNBOOK.md`](docs/RUNBOOK.md) | Apply order, moving accounts between OUs, stale locks, reserved name prefixes, production hardening deliberately omitted, teardown and what will not destroy cleanly |
+| [`docs/SECRETS.md`](docs/SECRETS.md) | Why Terraform must never author a secret value, RDS-managed rotation vs a rotation Lambda vs Parameter Store |
+| [`docs/CROSS-ACCOUNT-KMS.md`](docs/CROSS-ACCOUNT-KMS.md) | Why cross-account KMS needs grants on both sides, and how to tell which one is missing |
+| [`control-tower/README.md`](control-tower/README.md) | Why the landing zone is not applied, and why proactive controls never fire for Terraform |
+
 ---
 
 ## Repository layout
